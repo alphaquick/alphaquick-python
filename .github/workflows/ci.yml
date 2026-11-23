@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  samples:
+    # The free samples, fetched once and kept in the Actions cache: alphaquick.io
+    # allows 30 sample downloads an hour per address.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: samples-cache
+          key: samples-v1-${{ hashFiles('src/alphaquick/samples.py') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          ALPHAQUICK_CACHE: samples-cache
+        run: |
+          pip install .
+          for name in orderlog-zec-30min orderlog-hip4 l2-btc-hyperliquid l2-btc-hyperliquid-continuity l2-btc-hyperliquid-15min; do
+            alphaquick samples fetch "$name"
+          done
+
+  test:
+    needs: samples
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: samples-cache
+          key: samples-v1-${{ hashFiles('src/alphaquick/samples.py') }}
+          fail-on-cache-miss: true
+      - run: pip install ".[pandas,test]"
+      - name: Tests, the real samples included
+        env:
+          ALPHAQUICK_CACHE: samples-cache
+        run: pytest -ra
+      - name: The command line on a sample
+        env:
+          ALPHAQUICK_CACHE: samples-cache
+        run: |
+          alphaquick info samples-cache/samples/HIP4_3600_Fed-Oct-no-change_HLC_20261023.bin.lz4
+          alphaquick book samples-cache/samples/ZEC_HLC_20261014_sample.bin.lz4 --at 2026-10-14T00:15:00 --levels 3 --queue 2
+
+  without-pandas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ".[test]"
+      - run: pytest -ra
