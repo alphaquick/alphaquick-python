@@ -12,8 +12,8 @@ def test_l2_names_split_the_venue_from_the_end():
         "YB-USD_UM_XPERP-310829_OKX_20261101.bin.lz4": ("YB-USD_UM_XPERP-310829", "OKX"),
         "YGG_HYPERLIQUID_NODE_B_bbo_20261101.bin.lz4": ("YGG", "HYPERLIQUID_NODE_B_bbo"),
         "BTC_HYPERLIQUID_20261101.bin.lz4": ("BTC", "HYPERLIQUID"),
-        "BTC_HYPERLIQUID_bbo_20261101.bin.lz4": ("BTC", "HYPERLIQUID_bbo"),
-        "xyz_TSLA_HYPERLIQUID_bbo_20261101.bin.lz4": ("xyz_TSLA", "HYPERLIQUID_bbo"),
+        "BTC_HYPERLIQUID_BBO_20261101.bin.lz4": ("BTC", "HYPERLIQUID_BBO"),
+        "xyz_TSLA_HYPERLIQUID_BBO_20261101.bin.lz4": ("xyz_TSLA", "HYPERLIQUID_BBO"),
         "xyz_TSLA_HYPERLIQUID_20261101.bin.lz4": ("xyz_TSLA", "HYPERLIQUID"),
         "KRW-BTC_UPBIT_20261101.bin.lz4": ("KRW-BTC", "UPBIT"),
         "ABC_NEWVENUE_20261101.bin.lz4": ("ABC", "NEWVENUE"),
@@ -23,8 +23,8 @@ def test_l2_names_split_the_venue_from_the_end():
         assert (parsed.symbol, parsed.venue, parsed.day, parsed.continuity) == (symbol, venue, "20261101", False), name
     side = names.parse_l2_name("BTC_HYPERLIQUID_20261101.continuity.jsonl")
     assert side.continuity and side.venue == "HYPERLIQUID"
-    side = names.parse_l2_name("xyz_TSLA_HYPERLIQUID_bbo_20261126.continuity.jsonl")
-    assert (side.symbol, side.venue, side.continuity) == ("xyz_TSLA", "HYPERLIQUID_bbo", True)
+    side = names.parse_l2_name("xyz_TSLA_HYPERLIQUID_BBO_20261126.continuity.jsonl")
+    assert (side.symbol, side.venue, side.continuity) == ("xyz_TSLA", "HYPERLIQUID_BBO", True)
     assert names.parse_l2_name("BTC_HLC_20261101.bin.lz4") is None
     assert names.parse_l2_name("notes.txt") is None
     assert names.parse_l2_name("BTC_OKX_\uff120261101.bin.lz4") is None  # only ASCII digits make a day

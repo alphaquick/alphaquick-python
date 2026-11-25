@@ -48,7 +48,7 @@ L2:
 - `l2.book_at` (and `alphaquick book`) decide where to stop on depth updates
   only: a trade stamped a little later no longer ends the book early.
   `l2.replay_into` applies events to a book up to a moment.
-- The venue `HYPERLIQUID_bbo` in file names.
+- The venue `HYPERLIQUID_BBO` in file names.
 - Corrected: `trade_id` is the trade's number in the file, not the venue's id
   (it can repeat in files up to 2026-11-25); trade sides are 1 or 2 only;
   `uncross` is for BINANCE_USDM and ASTER files up to 2026-11-25, which hold

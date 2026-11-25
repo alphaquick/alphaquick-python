@@ -23,8 +23,9 @@ from typing import NamedTuple, Optional
 #: L2 venue codes, longest first (a venue not listed yet is still read, with
 #: the last part of the name as its code).
 L2_VENUES = tuple(sorted((
+    "BINANCE_BBO_COINM", "BINANCE_BBO_USDM", "BINANCE_BBO_SPOT",
     "BYBIT_INVERSE", "BINANCE_USDM", "BINANCE_COINM", "BINANCE_SPOT", "BINANCE_HFT",
-    "HYPERLIQUID_NODE", "HYPERLIQUID_bbo", "HYPERLIQUID", "BINANCE", "BITHUMB", "LIGHTER", "ASTER",
+    "HYPERLIQUID_NODE", "HYPERLIQUID_BBO", "HYPERLIQUID", "BINANCE", "BITHUMB", "LIGHTER", "ASTER",
     "BYBIT", "UPBIT", "DYDX", "OKX",
 ), key=len, reverse=True))
 
