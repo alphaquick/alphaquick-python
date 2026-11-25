@@ -82,15 +82,22 @@ def cmd_info(args: argparse.Namespace) -> int:
         parsed = names.parse_l2_name(path)
         if parsed:
             print(f"L2 depth & trades: {parsed.symbol} on {parsed.venue}, {parsed.day}")
+        continuity = _continuity(path, args.continuity)
         book = l2.L2Book()
         depth = trades = clears = 0
+        gaps: Counter = Counter()
         first = last = None
         truncated = None
         try:
-            for event in l2.read_l2(path):
+            for event in l2.read_l2(path, continuity=continuity):
+                kind_of = type(event)
+                if kind_of is l2.Gap:
+                    gaps[event.reason] += 1
+                    book.apply_gap(event)
+                    continue
                 first = event.time if first is None else first
                 last = event.time
-                if type(event) is l2.Trade:
+                if kind_of is l2.Trade:
                     trades += 1
                 else:
                     depth += 1
@@ -101,9 +108,13 @@ def cmd_info(args: argparse.Namespace) -> int:
         print(f"{depth:,} depth updates ({clears:,} snapshots start), {trades:,} trades")
         if first is not None:
             print(f"from {ticks_to_datetime(first):%Y-%m-%d %H:%M:%S.%f} to {ticks_to_datetime(last):%Y-%m-%d %H:%M:%S.%f} UTC")
+        if continuity is not None:
+            told = ", ".join(f"{reason} {n:,}" for reason, n in gaps.most_common())
+            print(f"gaps in the feed (continuity file): {sum(gaps.values()):,}" + (f" ({told})" if told else ""))
         bid, ask = book.best_bid(), book.best_ask()
         print(f"book at the end: best bid {_px(bid and bid[0])}, best ask {_px(ask and ask[0])}, "
               f"{len(book.bids):,} bid / {len(book.asks):,} ask levels")
+        _gap_warning(book, "the end of the file")
         return _truncated(truncated)
 
     replay = orderlog.Replay(path)
@@ -154,6 +165,23 @@ def _mb(size: int) -> str:
     return f"{size / 1024 ** 2:,.1f} MB"
 
 
+def _continuity(path: str, given: Optional[str]):
+    """The continuity file to read gaps from: the one given, or the one next to the data file."""
+    if given:
+        return given
+    sibling = l2.continuity_path(path) if path.endswith(".bin.lz4") else None
+    return sibling if sibling and os.path.isfile(sibling) else None
+
+
+def _gap_warning(book: l2.L2Book, moment: str) -> None:
+    if book.known:
+        return
+    gap = book.gap
+    since = f" since {ticks_to_datetime(gap.time):%Y-%m-%d %H:%M:%S.%f} UTC ({gap.reason})" if gap else ""
+    print(f"warning: {moment} is inside a gap in the feed{since}: no depth was recorded from the gap "
+          "until the next fresh book, so the levels above are the last ones before the gap, not the venue's book.")
+
+
 def _truncated(error) -> int:
     if error is None:
         return 0
@@ -176,11 +204,7 @@ def cmd_book(args: argparse.Namespace) -> int:
         book = l2.L2Book()
         truncated = None
         try:
-            for event in l2.read_l2(path):
-                if until is not None and event.time > until:
-                    break
-                if type(event) is l2.DepthUpdate:
-                    book.apply(event)
+            l2.replay_into(book, l2.read_l2(path, continuity=_continuity(path, args.continuity)), until)
         except TruncatedFileError as error:
             truncated = error
         if truncated is not None and book.time is not None:
@@ -189,6 +213,7 @@ def cmd_book(args: argparse.Namespace) -> int:
         _print_ladder([(p, s, None) for p, s in bids], [(p, s, None) for p, s in asks])
         if not book.consistent:
             print("(the book is in the middle of a transaction at this moment)")
+        _gap_warning(book, "the moment asked" if until is not None else "the end of the file")
         return _truncated(truncated)
     replay = orderlog.Replay(path)
     truncated = None
@@ -201,12 +226,21 @@ def cmd_book(args: argparse.Namespace) -> int:
     book = replay.book
     _print_ladder(book.depth(orderlog.BID, args.levels), book.depth(orderlog.ASK, args.levels))
     if args.queue:
+        outcome = replay.outcome
         for side, best in ((orderlog.BID, book.best_bid()), (orderlog.ASK, book.best_ask())):
             if best is None:
                 continue
-            print(f"\nqueue at the best {'bid' if side == orderlog.BID else 'ask'} {_px(best)}, front first:")
-            for place, order in enumerate(book.queue(side, best)[: args.queue], 1):
-                print(f"  {place:>3}. {_sz(order.size):>14}  {replay.address(order.user_id)}  oid {order.oid}")
+            for second in ((False, True) if book.outcome else (False,)):
+                queue = book.queue(side, best, second)
+                if book.outcome and not queue:
+                    continue
+                which = ""
+                if book.outcome:  # one queue per side book in an outcome file
+                    labels = outcome.sides if outcome is not None else ("the first side", "the second side")
+                    which = f" ({labels[1] if second else labels[0]}'s book)"
+                print(f"\nqueue at the best {'bid' if side == orderlog.BID else 'ask'} {_px(best)}{which}, front first:")
+                for place, order in enumerate(queue[: args.queue], 1):
+                    print(f"  {place:>3}. {_sz(order.size):>14}  {replay.address(order.user_id)}  oid {order.oid}")
     return _truncated(truncated)
 
 
@@ -302,6 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("info", help="what a file holds")
     p.add_argument("file")
+    p.add_argument("--continuity", metavar="PATH", help="L2: the continuity file (default: the one next to FILE)")
     p.set_defaults(func=cmd_info)
 
     p = sub.add_parser("book", help="the book at a moment, or at the end of the file")
@@ -309,6 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--at", help="a UTC time on the file's day (12:00, 12:00:30.5) or a full date and time")
     p.add_argument("--levels", type=int, default=10, help="price levels each side (default 10)")
     p.add_argument("--queue", type=int, default=0, metavar="N", help="order log: also list the first N orders at each best price")
+    p.add_argument("--continuity", metavar="PATH", help="L2: the continuity file (default: the one next to FILE)")
     p.set_defaults(func=cmd_book)
 
     p = sub.add_parser("dump", help="records as JSON lines")

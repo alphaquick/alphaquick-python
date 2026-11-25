@@ -8,12 +8,22 @@ followed by that block's ORDER events and TRADEs. USER records name each
 account before its first use, and carry the time of the block it first
 appears in, so the BLOCK records are the clock.
 
+Within a block the records come in the order they must be applied: orders
+that open, are rejected or trigger, then the trades, then the converter's
+reduce-only resizes (status 252 with ``ORDER_RO_CAP``, holding each order's
+size after the trades), then the removals (filled, canceled and so on).
+Apply them in file order, as :class:`Replay` does.
+
 Rebuild the book with :class:`Replay` (or :class:`OrderBook` directly)::
 
     replay = Replay("BTC_HLC_20261101.bin.lz4")
     for record in replay:          # each record is applied, then yielded
         ...
     replay.book.best_bid()
+
+Files are published one folder per day, ``<YYYYMMDD>/<COIN>_HLC_<YYYYMMDD>.bin.lz4``,
+with the HIP-4 outcome files in ``<YYYYMMDD>/hip4/`` (in R2 under
+``hyperliquid/hlc_v2/``).
 
 See https://docs.alphaquick.io/data/hyperliquid-order-log#format
 """
@@ -52,20 +62,56 @@ META_OUTCOME = 1  #: a HIP-4 outcome market with both books in one file
 ORDER_REDUCE_ONLY = 1
 ORDER_TRIGGER = 2
 ORDER_POSITION_TPSL = 4
+#: With status 252 (and ORDER_REDUCE_ONLY): the exchange shrank a resting
+#: reduce-only order so that the account's reduce-only orders on that side
+#: total no more than its position. The exchange does not log this; the record
+#: is written after the block's trades and holds the size after them.
+ORDER_RO_CAP = 0x10
+#: With status 251: an order of a system account (Hyperliquidity), whose
+#: placement the node never logs, rebuilt and written in the block it was
+#: placed in. A regular event, not a correction.
+ORDER_REBUILT = 0x20
+#: With status 250, 251 or 252: a correction against an exchange snapshot,
+#: written in a BLOCK of its own (numbered with the snapshot's height).
+ORDER_SNAPSHOT_FIX = 0x40
 ORDER_SECOND_SIDE = 0x80  #: outcome files: the order rests on the second side's book
 
 #: Trade flags.
 TRADE_MAKER_OID = 1  #: the maker order id is set
 TRADE_TAKER_OID = 2  #: the taker order id is set
 TRADE_MAKER_IS_BUYER = 4
-TRADE_DIRECTION_SHIFT = 3  #: bits 3-4: Hyperliquid's direction override (0 none, 1 buy, 2 sell)
+#: Bits 3-4: Hyperliquid's direction override: 0 none, 1 buy, 2 sell, 3 a system print.
+TRADE_DIRECTION_SHIFT = 3
+TRADE_DIRECTION_MASK = 0x18
+#: The value of bits 3-4 for a system print (see :attr:`Trade.is_system_print`).
+TRADE_SYSTEM_PRINT = 3
 TRADE_MAKER_TWAP = 32
 TRADE_TAKER_TWAP = 64
 TRADE_SECOND_SIDE = 0x80  #: outcome files: the trade printed on the second side's book
 
 
 class Status(IntEnum):
-    """Order event statuses. The names are Hyperliquid's; 250-252 are corrections."""
+    """Order event statuses. The names are Hyperliquid's, except 250-252.
+
+    250-252 are written by the converter, not by the exchange, and are applied
+    like any other event (in file order):
+
+    * 250 removes the order. With ``ORDER_SNAPSHOT_FIX``: an exchange snapshot
+      shows the order is gone. Without it: it follows the reject of a triggered
+      order the file had made rest, and takes it out.
+    * 251 adds the order at the back of its price. With ``ORDER_REBUILT``: an
+      order of a system account (Hyperliquidity) placed in that block. With
+      ``ORDER_SNAPSHOT_FIX``: an exchange snapshot shows the order rests.
+      With neither: a triggered stop or take-profit limit order that starts
+      resting (the exchange logs no ``open`` for it).
+    * 252 sets the order's remaining size and keeps its place in the queue.
+      With ``ORDER_RO_CAP`` (and ``ORDER_REDUCE_ONLY``): the exchange shrank a
+      reduce-only order to the account's position; written after the block's
+      trades, with the size after them. With ``ORDER_SNAPSHOT_FIX``: an
+      exchange snapshot shows the size.
+
+    Corrections (``ORDER_SNAPSHOT_FIX``) come in a BLOCK of their own.
+    """
 
     OPEN = 0
     FILLED = 1
@@ -91,10 +137,15 @@ class Status(IntEnum):
     TOO_AGGRESSIVE_AT_OPEN_INTEREST_CAP_REJECTED = 21
     OPEN_INTEREST_CAP_CANCELED = 22
     OPEN_INTEREST_INCREASE_REJECTED = 23
-    CORRECTION_GONE = 250  #: the converter's correction: the order is gone
-    CORRECTION_RESTS = 251  #: the converter's correction: the order rests
-    CORRECTION_SIZE = 252  #: the converter's correction: the order's remaining size
-    OTHER = 255  #: a status the format has no code for
+    VAULT_WITHDRAWAL_CANCELED = 24  #: a vault's resting orders canceled to free funds for a withdrawal
+    PERP_MAX_POSITION_REJECTED = 25
+    DELISTED_CANCELED = 26  #: every resting order of a market canceled when it is delisted
+    INSUFFICIENT_WEI_CANCELED = 27  #: spot and HIP-4: the account no longer holds the tokens behind the order
+    PRIORITY_ALO_REDUCE_ONLY_REJECTED = 28  #: a new reduce-only ALO order with a priority fee, refused
+    CORRECTION_GONE = 250  #: written by the converter: the order is gone
+    CORRECTION_RESTS = 251  #: written by the converter: the order rests (see the flags)
+    CORRECTION_SIZE = 252  #: written by the converter: the order's remaining size (see the flags)
+    OTHER = 255  #: a status the format has no code for (never in published files)
 
 
 #: Hyperliquid's own name of each status.
@@ -107,13 +158,15 @@ STATUS_NAMES = {
     17: "outcomeSettledCanceled", 18: "scheduledCancel", 19: "marginCanceled",
     20: "liquidatedCanceled", 21: "tooAggressiveAtOpenInterestCapRejected",
     22: "openInterestCapCanceled", 23: "openInterestIncreaseRejected",
+    24: "vaultWithdrawalCanceled", 25: "perpMaxPositionRejected", 26: "delistedCanceled",
+    27: "insufficientWeiCanceled", 28: "priorityAloReduceOnlyRejected",
     250: "correction: gone", 251: "correction: rests", 252: "correction: size", 255: "other",
 }
 
 #: Statuses that remove the order from the book.
-REMOVING_STATUSES = frozenset({1, 2, 9, 13, 15, 17, 18, 19, 20, 22, 250})
+REMOVING_STATUSES = frozenset({1, 2, 9, 13, 15, 17, 18, 19, 20, 22, 24, 26, 27, 250})
 #: Statuses that are rejections: the order never rested.
-REJECT_STATUSES = frozenset({3, 4, 5, 6, 7, 8, 10, 11, 12, 16, 21, 23})
+REJECT_STATUSES = frozenset({3, 4, 5, 6, 7, 8, 10, 11, 12, 16, 21, 23, 25, 28})
 
 
 class Tif(IntEnum):
@@ -146,7 +199,9 @@ class TradeKind(IntEnum):
     SECOND_BOOK = 2  #: both orders on the second side's book
     MINT = 3  #: a buy on each book: a new pair of tokens was created
     MERGE = 4  #: a sell on each book: a pair was redeemed for its collateral
-    UNKNOWN = 5  #: the maker order was not in the book, so its book is not known
+    #: the maker order was not in the book, so its book is not known; system
+    #: prints (settlements, outcome actions) come out as this kind
+    UNKNOWN = 5
 
 
 def status_name(code: int) -> str:
@@ -169,19 +224,29 @@ _OUTCOME_HEAD = struct.Struct("<hHqH")  # header, version
 _MAGIC = int.from_bytes(b"HLC1", "little")
 
 
+#: META ``dex`` of spot pairs and HIP-4 outcome files.
+DEX_SPOT = 254
+
+
 class Meta(NamedTuple):
     """What the file is. The first record of every file."""
 
     time: int
     version: int
     size_decimals: int  #: size decimals of the instrument
-    dex: int  #: dex index (0 for the main perpetuals)
-    asset: int  #: asset index within the dex
+    #: 0 for the main perpetuals, the deployer's dex index for a HIP-3 market,
+    #: :data:`DEX_SPOT` (254) for spot pairs and HIP-4 outcome files
+    dex: int
+    #: asset index within the dex; the pair index for spot; 65535 in HIP-4 outcome files
+    asset: int
     flags: int  #: META_OUTCOME
     day: int  #: the day, as the number YYYYMMDD
     start_block: int  #: the block the day starts from
     start_block_time_ns: int  #: that block's time, Unix nanoseconds
-    coin: str  #: the coin (``xyz:CL``); for an outcome file with both books, the market's title cut to 64 bytes
+    #: the coin (``xyz:CL``, ``PURR/USDC``, ``@107``); ``HIP4:<outcome id>`` in a
+    #: HIP-4 outcome file (some earlier outcome files held the market's title
+    #: here, cut to 64 bytes). The OUTCOME record names the market.
+    coin: str
 
     @property
     def is_outcome(self) -> bool:
@@ -193,9 +258,11 @@ class Block(NamedTuple):
     """A new block: the records after it, up to the next Block, happened in it."""
 
     time: int
-    number: int
+    number: int  #: the block height (for a BLOCK of snapshot corrections, the snapshot's height)
     time_ns: int  #: consensus block time, Unix nanoseconds: the clock to sequence by
-    local_time_ns: int  #: when AlphaQuick's node wrote the block, Unix nanoseconds
+    #: equal to ``time_ns`` in current files: no receive time is published.
+    #: (Files of the withdrawn first build had the node's receive time here.)
+    local_time_ns: int
 
     @property
     def datetime(self):
@@ -264,6 +331,25 @@ class Trade(NamedTuple):
     @property
     def has_taker_oid(self) -> bool:
         return bool(self.flags & TRADE_TAKER_OID)
+
+    @property
+    def direction(self) -> int:
+        """Hyperliquid's direction override (flag bits 3-4): 0 none, 1 buy, 2 sell, 3 a system print."""
+        return (self.flags >> TRADE_DIRECTION_SHIFT) & 3
+
+    @property
+    def is_system_print(self) -> bool:
+        """A trade the exchange booked without a match in the book.
+
+        HIP-4 settlements and outcome actions (mint, merge, negate) against a
+        system account; in perpetual and spot files, the settlement of
+        positions when a market is delisted, lending-pool liquidations and
+        vault position nettings. The counter-order was never in a book, so do
+        not expect to find it there. Exchange candles do not count these
+        trades: leave them out of volume and price statistics when comparing
+        with candles.
+        """
+        return (self.flags >> TRADE_DIRECTION_SHIFT) & 3 == TRADE_SYSTEM_PRINT
 
     @property
     def on_second_side(self) -> bool:
@@ -483,8 +569,8 @@ class OrderBook:
 
     * SNAPORDER adds an order; the records come in queue order.
     * ORDER ``open`` with a time in force other than NONE adds an order at the
-      back of its price; correction 251 adds one; correction 252 sets the
-      remaining size and keeps the place in the queue.
+      back of its price; status 251 adds one; status 252 sets the remaining
+      size and keeps the place in the queue (see :class:`Status`).
     * ORDER with a removing status (:data:`REMOVING_STATUSES`) removes it.
     * TRADE reduces the maker and the taker order, where each rests.
     * Everything else (rejects, ``triggered``, trigger-order placements)
@@ -492,19 +578,51 @@ class OrderBook:
 
     An order filled down to zero stays listed (size 0) until the event that
     removes it, which follows in the same block.
+
+    Queue order is the order of the placements. It is exact except among
+    orders at one price placed less than 400 ms apart: there the exchange
+    sorts post-only orders by the priority fee their senders paid, which is
+    not in the data, so a later order can be ahead of an earlier one. Outcome
+    markets allow no priority fees.
+
+    ``outcome=True`` (set by :class:`Replay` for a HIP-4 outcome file) keeps a
+    separate queue for each side's book at every price: in such a file both
+    books are written in the first side's terms, and an order of one book is
+    never ahead of an order of the other. The price levels (:attr:`bids`,
+    :attr:`asks`, :meth:`depth`) add up both books.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, outcome: bool = False) -> None:
         #: oid -> RestingOrder
         self.orders: dict[int, RestingOrder] = {}
         #: total resting size per price, best first
         self.bids = Levels(descending=True)
         self.asks = Levels(descending=False)
-        self._queues: dict[tuple[int, int], dict[int, RestingOrder]] = {}
+        # (side, price, ORDER_SECOND_SIDE bit or 0) -> {oid: order}, front of the queue first
+        self._queues: dict[tuple[int, int, int], dict[int, RestingOrder]] = {}
         self._seq = 0
+        self._book_bit = ORDER_SECOND_SIDE if outcome else 0
 
     def __len__(self) -> int:
         return len(self.orders)
+
+    @property
+    def outcome(self) -> bool:
+        """True when each price keeps one queue per side book (HIP-4 outcome files)."""
+        return bool(self._book_bit)
+
+    @outcome.setter
+    def outcome(self, value: bool) -> None:
+        bit = ORDER_SECOND_SIDE if value else 0
+        if bit == self._book_bit:
+            return
+        self._book_bit = bit
+        self._queues = {}
+        for order in sorted(self.orders.values(), key=lambda o: o.seq):
+            self._queues.setdefault(self._key(order.side, order.price, order.flags), {})[order.oid] = order
+
+    def _key(self, side: int, price: int, flags: int) -> tuple[int, int, int]:
+        return side, price, flags & self._book_bit
 
     # -- changes -----------------------------------------------------------
 
@@ -520,9 +638,9 @@ class OrderBook:
 
     def apply_order(self, record: Order) -> None:
         status = record.status
-        if status == 252:  # correction: remaining size, same place in the queue
+        if status == 252:  # remaining size, same place in the queue
             self.resize(record.oid, record.size)
-        elif (status == 0 and record.tif != 0) or status == 251:  # open (not a waiting trigger order), correction: rests
+        elif (status == 0 and record.tif != 0) or status == 251:  # open (not a waiting trigger order); the order rests
             self.insert(record.oid, record.side, record.price, record.size, record.user_id, record.flags)
         elif status in REMOVING_STATUSES:
             self.remove(record.oid)
@@ -540,7 +658,7 @@ class OrderBook:
         self._seq += 1
         order = RestingOrder(oid, side, price, size, user_id, flags, self._seq)
         self.orders[oid] = order
-        key = (side, price)
+        key = (side, price, flags & self._book_bit)
         queue = self._queues.get(key)
         if queue is None:
             self._queues[key] = {oid: order}
@@ -553,7 +671,7 @@ class OrderBook:
         order = self.orders.pop(oid, None)
         if order is not None:
             (self.bids if order.side == BID else self.asks).add(order.price, -order.size)
-            key = (order.side, order.price)
+            key = (order.side, order.price, order.flags & self._book_bit)
             queue = self._queues[key]
             del queue[oid]
             if not queue:
@@ -599,21 +717,36 @@ class OrderBook:
         """The best ask price (x10**8), or None."""
         return self.asks.best()
 
-    def queue(self, side: int, price: int) -> list[RestingOrder]:
+    def queue(self, side: int, price: int, second_side: bool = False) -> list[RestingOrder]:
         """The orders resting at a price, front of the queue first.
 
+        In an outcome book (:attr:`outcome`) each price has one queue per side
+        book: this is the first side's, or with ``second_side=True`` the
+        second side's (orders with ``ORDER_SECOND_SIDE``). Elsewhere there is
+        one queue, and ``second_side=True`` gives an empty list.
+
         An order filled down to zero is still listed (size 0) until the event
-        that removes it, later in the same block.
+        that removes it, later in the same block. Among orders placed less
+        than 400 ms apart the order can differ from the exchange's (see the
+        class description).
         """
-        return list(self._queues.get((side, price), {}).values())
+        if second_side and not self._book_bit:
+            return []
+        return list(self._queues.get((side, price, ORDER_SECOND_SIDE if second_side else 0), {}).values())
 
     def queue_position(self, oid: int) -> Optional[tuple[int, int]]:
-        """``(orders_ahead, size_ahead)`` of a resting order in its price's queue, or None."""
+        """``(orders_ahead, size_ahead)`` of a resting order in its price's queue, or None.
+
+        In an outcome book only the orders of the same side book count. Orders
+        placed less than 400 ms before this one may in fact be behind it, and
+        those placed less than 400 ms after it ahead (priority fees, which the
+        data does not show).
+        """
         order = self.orders.get(oid)
         if order is None:
             return None
         ahead = size = 0
-        for other in self._queues[(order.side, order.price)].values():
+        for other in self._queues[(order.side, order.price, order.flags & self._book_bit)].values():
             if other is order:
                 return ahead, size
             if other.size > 0:  # an order filled to zero is about to be removed
@@ -625,12 +758,17 @@ class OrderBook:
         """``[(price, total_size, order_count), ...]`` from the best price outwards.
 
         Orders filled down to zero (removed by an event later in the same
-        block) are not counted.
+        block) are not counted. In an outcome book both side books count.
         """
         out = []
+        queues = self._queues
         for price, total in self._levels(side).top(levels):
-            queue = self._queues.get((side, price), {})
-            out.append((price, total, sum(1 for order in queue.values() if order.size > 0)))
+            count = 0
+            for bit in ((0, ORDER_SECOND_SIDE) if self._book_bit else (0,)):
+                queue = queues.get((side, price, bit))
+                if queue:
+                    count += sum(1 for order in queue.values() if order.size > 0)
+            out.append((price, total, count))
         return out
 
     def orders_of(self, user_id: int) -> list[RestingOrder]:
@@ -651,7 +789,11 @@ class Replay:
     (outcome files with both books), the accounts seen so far
     (:attr:`accounts`, user id -> address), the current :attr:`block` and, for
     each trade of an outcome market, its :attr:`last_trade_kind` (read from the
-    book before the trade changed it).
+    book before the trade changed it). Records are applied in file order,
+    which is the order the format requires.
+
+    For an outcome file the book keeps one queue per side book at each price
+    (``OrderBook(outcome=True)``, set from the META record).
     """
 
     def __init__(self, source: Source) -> None:
@@ -735,6 +877,7 @@ class Replay:
         elif kind is Meta:
             self.meta = record  # type: ignore[assignment]
             self._outcome_file = record.is_outcome  # type: ignore[union-attr]
+            self.book.outcome = self._outcome_file  # one queue per side book in an outcome file
         elif kind is Outcome:
             self.outcome = record.info()  # type: ignore[union-attr]
 

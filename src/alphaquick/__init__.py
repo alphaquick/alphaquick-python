@@ -11,8 +11,8 @@ Quick start::
 
     import alphaquick as aq
 
-    for event in aq.read_l2("BTC_HYPERLIQUID_20261101.bin.lz4"):
-        ...
+    for event in aq.read_l2("BTC_HYPERLIQUID_20261101.bin.lz4", continuity="auto"):
+        ...                        # DepthUpdate, Trade, and Gap from the continuity file
 
     replay = aq.Replay("xyz_CL_HLC_20261101.bin.lz4").run()
     print(replay.book.best_bid(), replay.book.best_ask())
@@ -22,7 +22,7 @@ Formats: https://docs.alphaquick.io/data/overview
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from ._container import FormatError, TruncatedFileError, iter_blocks, iter_raw_records
 from ._time import (
@@ -35,14 +35,14 @@ from ._time import (
     unix_ns_to_datetime,
 )
 from . import l2, names, orderlog, samples
-from .l2 import DepthUpdate, L2Book, read_l2
+from .l2 import DepthUpdate, Gap, L2Book, read_continuity, read_l2
 from .orderlog import OrderBook, Replay, read_orderlog
 
 __all__ = [
     "__version__", "FormatError", "TruncatedFileError", "iter_blocks", "iter_raw_records",
     "SCALE", "TICKS_AT_UNIX_EPOCH", "datetime_to_ticks", "ticks_to_datetime", "ticks_to_unix_ns",
     "to_float", "unix_ns_to_datetime", "l2", "names", "orderlog", "samples",
-    "DepthUpdate", "L2Book", "read_l2", "OrderBook", "Replay", "read_orderlog", "detect",
+    "DepthUpdate", "Gap", "L2Book", "read_continuity", "read_l2", "OrderBook", "Replay", "read_orderlog", "detect",
 ]
 
 

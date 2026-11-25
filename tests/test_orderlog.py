@@ -222,3 +222,144 @@ def test_trade_kinds_of_an_outcome_market():
 def test_trade_kind_is_none_outside_outcome_files():
     replay = aq.Replay(capture())
     assert all(replay.last_trade_kind is ol.TradeKind.NONE for _ in replay)
+
+
+# -- statuses and the converter's records (format v2) -------------------------
+
+# The writer's own tables, copied from hl_convert/hlc/src/records.rs
+# (status_from_str, status_removes, status_is_reject): the reader must agree
+# with them code for code.
+WRITER_NAMES = {
+    0: "open", 1: "filled", 2: "canceled", 3: "badAloPxRejected", 4: "perpMarginRejected",
+    5: "minTradeNtlRejected", 6: "iocCancelRejected", 7: "tooManyOpenOrdersRejected",
+    8: "insufficientSpotBalanceRejected", 9: "reduceOnlyCanceled", 10: "reduceOnlyRejected",
+    11: "oracleRejected", 12: "positionIncreaseAtOpenInterestCapRejected", 13: "selfTradeCanceled",
+    14: "triggered", 15: "siblingFilledCanceled", 16: "positionFlipAtOpenInterestCapRejected",
+    17: "outcomeSettledCanceled", 18: "scheduledCancel", 19: "marginCanceled", 20: "liquidatedCanceled",
+    21: "tooAggressiveAtOpenInterestCapRejected", 22: "openInterestCapCanceled",
+    23: "openInterestIncreaseRejected", 24: "vaultWithdrawalCanceled", 25: "perpMaxPositionRejected",
+    26: "delistedCanceled", 27: "insufficientWeiCanceled", 28: "priorityAloReduceOnlyRejected",
+}
+WRITER_REMOVES = {1, 2, 9, 13, 15, 17, 18, 19, 20, 22, 24, 26, 27, 250}
+WRITER_REJECTS = {3, 4, 5, 6, 7, 8, 10, 11, 12, 16, 21, 23, 25, 28}
+
+
+def test_every_status_code_matches_the_writer():
+    assert ol.REMOVING_STATUSES == WRITER_REMOVES and ol.REJECT_STATUSES == WRITER_REJECTS
+    for code in list(range(29)) + [250, 251, 252, 255]:
+        assert ol.Status(code).value == code
+        if code in WRITER_NAMES:
+            assert ol.status_name(code) == WRITER_NAMES[code]
+        # On the book: an order resting at 100, then an event of this status for it.
+        book = ol.OrderBook()
+        book.insert(1, BID, 100 * P, 2 * P, 7)
+        book.apply_order(ol.Order(T0, code, BID, ol.Tif.GTC, 0, 0, 1, 100 * P, P, 7))
+        if code in WRITER_REMOVES:
+            assert 1 not in book.orders, code
+        elif code == 252:
+            assert book.orders[1].size == P  # resized in place
+        elif code in (0, 251):
+            assert book.orders[1].size == P  # placed again (replaced)
+        else:
+            assert book.orders[1].size == 2 * P, code  # rejects, triggered, other: no effect
+        # A new order of a reject status never rests.
+        book.apply_order(ol.Order(T0, code, ASK, ol.Tif.GTC, 0, 0, 2, 101 * P, P, 7))
+        assert (2 in book.orders) == (code in (0, 251)), code
+
+
+def test_new_statuses_24_to_28():
+    book_file = io.BytesIO(container(
+        meta("PURR/USDC") + user(1, 0xAA)
+        + snap(10, BID, 1.0, 1.0, 1) + snap(11, BID, 0.9, 1.0, 1) + snap(12, ASK, 1.1, 1.0, 1),
+        block(500, B1)
+        + order(ol.Status.PERP_MAX_POSITION_REJECTED, 20, BID, 1.2, 1.0, 1, time=B1)
+        + order(ol.Status.PRIORITY_ALO_REDUCE_ONLY_REJECTED, 21, ASK, 0.8, 1.0, 1, tif=ol.Tif.ALO, flags=ol.ORDER_REDUCE_ONLY, time=B1)
+        + order(ol.Status.VAULT_WITHDRAWAL_CANCELED, 10, BID, 1.0, 1.0, 1, time=B1)
+        + order(ol.Status.DELISTED_CANCELED, 11, BID, 0.9, 1.0, 1, time=B1)
+        + order(ol.Status.INSUFFICIENT_WEI_CANCELED, 12, ASK, 1.1, 1.0, 1, time=B1),
+    ))
+    replay = aq.Replay(book_file).run()
+    assert len(replay.book) == 0 and replay.book.best_bid() is None  # 24, 26, 27 removed; 25, 28 never rested
+    assert [ol.status_name(c) for c in range(24, 29)] == [
+        "vaultWithdrawalCanceled", "perpMaxPositionRejected", "delistedCanceled",
+        "insufficientWeiCanceled", "priorityAloReduceOnlyRejected"]
+    assert ol.Status.INSUFFICIENT_WEI_CANCELED == 27 and ol.Status.PRIORITY_ALO_REDUCE_ONLY_REJECTED == 28
+
+
+def converter_capture() -> io.BytesIO:
+    """The converter's own records, in the order it writes them."""
+    RO = ol.ORDER_REDUCE_ONLY
+    return io.BytesIO(container(
+        meta("HMSTR") + user(1, 0xAA) + user(2, 0xBB) + user(3, 0xFF)
+        + snap(10, ASK, 101.0, 5.0, 2, flags=RO) + snap(11, ASK, 101.0, 2.0, 1),
+        block(500, B1)
+        # a Hyperliquidity order, rebuilt, placed in this block
+        + order(ol.Status.CORRECTION_RESTS, 30, BID, 99.0, 4.0, 3, flags=ol.ORDER_REBUILT, time=B1)
+        # a stop-limit order triggers and starts resting (no open for it)
+        + order(ol.Status.TRIGGERED, 31, BID, 98.0, 1.0, 1, tif=ol.Tif.NONE, order_type=ol.OrderType.STOP_LIMIT,
+                flags=ol.ORDER_TRIGGER, time=B1)
+        + order(ol.Status.CORRECTION_RESTS, 31, BID, 98.0, 1.0, 1, order_type=ol.OrderType.STOP_LIMIT,
+                flags=ol.ORDER_TRIGGER, time=B1)
+        # account 2 buys back 3 of its short: its reduce-only ask of 5 is capped at what is left
+        + trade(BID, 101.0, 1.0, 10, 40, 2, 1, flags=ol.TRADE_MAKER_OID, maker_pos=-3.0, time=B1)
+        + order(ol.Status.CORRECTION_SIZE, 10, ASK, 101.0, 2.0, 2, tif=0, flags=RO | ol.ORDER_RO_CAP, time=B1),
+        # snapshot corrections, in a block of their own
+        block(1_000_000, B2)
+        + order(ol.Status.CORRECTION_GONE, 31, BID, 98.0, 1.0, 1, tif=0, flags=ol.ORDER_SNAPSHOT_FIX, time=B2)
+        + order(ol.Status.CORRECTION_SIZE, 11, ASK, 101.0, 1.5, 1, tif=0, flags=ol.ORDER_SNAPSHOT_FIX, time=B2)
+        + order(ol.Status.CORRECTION_RESTS, 32, BID, 99.0, 1.0, 2, flags=ol.ORDER_SNAPSHOT_FIX, time=B2),
+    ))
+
+
+def test_the_converter_records_apply_in_file_order():
+    assert (ol.ORDER_RO_CAP, ol.ORDER_REBUILT, ol.ORDER_SNAPSHOT_FIX, ol.ORDER_SECOND_SIDE) == (0x10, 0x20, 0x40, 0x80)
+    replay = aq.Replay(converter_capture()).run(until=B1)
+    book = replay.book
+    assert book.orders[30].size == 4 * P and book.orders[31].size == P  # rebuilt and triggered orders rest
+    assert book.orders[10].size == 2 * P  # 5, filled 1, then capped to 2 after the trade
+    assert book.queue_position(11) == (1, 2 * P)  # the cap keeps 10's place in the queue
+    replay.run()
+    assert replay.block.number == 1_000_000
+    assert 31 not in book.orders and book.orders[11].size == 150_000_000 and book.orders[32].size == P
+    assert [o.oid for o in book.queue(BID, 99 * P)] == [30, 32]
+
+
+def test_system_prints():
+    flags = ol.TRADE_MAKER_OID | ol.TRADE_TAKER_OID
+    plain = ol.Trade(T0, BID, flags, P, P, 1, 2, 1, 2, 0, 0)
+    system = plain._replace(flags=flags | (ol.TRADE_SYSTEM_PRINT << ol.TRADE_DIRECTION_SHIFT))
+    sell = plain._replace(flags=flags | (2 << ol.TRADE_DIRECTION_SHIFT))
+    assert (plain.direction, plain.is_system_print) == (0, False)
+    assert (system.direction, system.is_system_print) == (3, True)
+    assert (sell.direction, sell.is_system_print) == (2, False)
+    assert ol.TRADE_DIRECTION_MASK == 3 << ol.TRADE_DIRECTION_SHIFT
+
+
+def test_outcome_files_keep_one_queue_per_side_book():
+    # At the same price in first-side terms: a Yes buy at 0.60, then a No sell at
+    # 0.40 (shown as a bid at 0.60 on the second book), then another Yes buy.
+    data = io.BytesIO(container(
+        meta("HIP4:3600", flags=ol.META_OUTCOME) + outcome(OUTCOME_TEXT) + user(1, 1) + user(2, 2),
+        block(1, B1)
+        + order(ol.Status.OPEN, 1, BID, 0.60, 5, 1, time=B1)
+        + order(ol.Status.OPEN, 2, BID, 0.60, 7, 2, flags=SECOND, time=B1)
+        + order(ol.Status.OPEN, 3, BID, 0.60, 1, 1, time=B1),
+    ))
+    replay = aq.Replay(data).run()
+    book = replay.book
+    assert book.outcome
+    assert book.queue_position(2) == (0, 0)  # first on its own book, whatever rests on the other
+    assert book.queue_position(3) == (1, 5 * P)  # behind 1 only
+    assert [o.oid for o in book.queue(BID, 60 * P // 100)] == [1, 3]
+    assert [o.oid for o in book.queue(BID, 60 * P // 100, second_side=True)] == [2]
+    assert book.depth(BID) == [(60 * P // 100, 13 * P, 3)]  # the level adds up both books
+    book.remove(1)
+    assert book.queue_position(3) == (0, 0)
+    # Turning the split off (or on) re-keys the orders in their arrival order.
+    book.outcome = False
+    assert [o.oid for o in book.queue(BID, 60 * P // 100)] == [2, 3] and book.queue(BID, 60 * P // 100, True) == []
+    assert book.queue_position(3) == (1, 7 * P)
+    book.outcome = True
+    assert book.queue_position(3) == (0, 0) and book.depth(BID) == [(60 * P // 100, 8 * P, 2)]
+    # Outside outcome files there is one queue, as before.
+    assert not aq.Replay(capture()).run().book.outcome

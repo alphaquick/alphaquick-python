@@ -12,6 +12,9 @@ def test_l2_names_split_the_venue_from_the_end():
         "YB-USD_UM_XPERP-310829_OKX_20261101.bin.lz4": ("YB-USD_UM_XPERP-310829", "OKX"),
         "YGG_HYPERLIQUID_NODE_B_bbo_20261101.bin.lz4": ("YGG", "HYPERLIQUID_NODE_B_bbo"),
         "BTC_HYPERLIQUID_20261101.bin.lz4": ("BTC", "HYPERLIQUID"),
+        "BTC_HYPERLIQUID_bbo_20261101.bin.lz4": ("BTC", "HYPERLIQUID_bbo"),
+        "xyz_TSLA_HYPERLIQUID_bbo_20261101.bin.lz4": ("xyz_TSLA", "HYPERLIQUID_bbo"),
+        "xyz_TSLA_HYPERLIQUID_20261101.bin.lz4": ("xyz_TSLA", "HYPERLIQUID"),
         "KRW-BTC_UPBIT_20261101.bin.lz4": ("KRW-BTC", "UPBIT"),
         "ABC_NEWVENUE_20261101.bin.lz4": ("ABC", "NEWVENUE"),
     }
@@ -20,6 +23,8 @@ def test_l2_names_split_the_venue_from_the_end():
         assert (parsed.symbol, parsed.venue, parsed.day, parsed.continuity) == (symbol, venue, "20261101", False), name
     side = names.parse_l2_name("BTC_HYPERLIQUID_20261101.continuity.jsonl")
     assert side.continuity and side.venue == "HYPERLIQUID"
+    side = names.parse_l2_name("xyz_TSLA_HYPERLIQUID_bbo_20261126.continuity.jsonl")
+    assert (side.symbol, side.venue, side.continuity) == ("xyz_TSLA", "HYPERLIQUID_bbo", True)
     assert names.parse_l2_name("BTC_HLC_20261101.bin.lz4") is None
     assert names.parse_l2_name("notes.txt") is None
     assert names.parse_l2_name("BTC_OKX_\uff120261101.bin.lz4") is None  # only ASCII digits make a day
@@ -31,13 +36,17 @@ def test_orderlog_names_read_back_the_coin():
         "xyz_BRK.B": ("xyz:BRK.B", "xyz"), "PURR_USDC": ("PURR/USDC", "spot"), "_107": ("@107", "spot"),
         "#114220": ("#114220", "outcome"),
         "HIP4_3600_Fed-Oct-no-change": ("HIP4_3600_Fed-Oct-no-change", "outcome"),
-        "HIP4_3600": ("HIP4/3600", "spot"),  # without the short name it is no merged outcome file
+        # the converter leaves the short name out when the title gives none: still an outcome file
+        "HIP4_3600": ("HIP4_3600", "outcome"),
+        "HIP4_1473_2026-2027-English-Premier-League-winner-A": ("HIP4_1473_2026-2027-English-Premier-League-winner-A", "outcome"),
+        "ABC_USDC": ("ABC/USDC", "spot"),
     }
     for stem, (coin, market) in cases.items():
         parsed = names.parse_orderlog_name(f"{stem}_HLC_20261101.bin.lz4")
         assert (parsed.coin, parsed.market, parsed.day) == (coin, market, "20261101"), stem
         assert names.orderlog_stem(coin) == stem
     assert names.parse_orderlog_name("BT C_HLC_20261101.bin.lz4") is None
+    assert names.parse_orderlog_name("/data/hlc_v2/20261117/hip4/HIP4_1473_HLC_20261117.bin.lz4").market == "outcome"
     assert names.file_kind("xyz_CL_HLC_20261101.bin.lz4") == "orderlog"
     assert names.file_kind("BTCUSDT_BINANCE_USDM_20261101.bin.lz4") == "l2"
     assert names.file_kind("ZEC_HLC_20261014_sample.bin.lz4") is None

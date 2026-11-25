@@ -50,7 +50,7 @@ full catalogue needs a subscription; see
 
 ```console
 $ alphaquick info FILE                           # what the file holds
-$ alphaquick book FILE --at 12:00 --queue 3      # the book at 12:00 UTC, with the queue at the best prices
+$ alphaquick book FILE --at 12:00 --queue 3      # the book at 12:00 UTC, with the queue at the best prices (warns inside a gap)
 $ alphaquick dump FILE --type trade --limit 5    # records as JSON lines, for any other tool
 $ alphaquick to-parquet FILE -o out/ --orders    # trades (and order events, or L2 quotes) as Parquet
 $ alphaquick samples [fetch NAME]                # the free samples
@@ -74,8 +74,9 @@ queue at the best ask 102.59, front first:
 
 ## In Python
 
-Prices, sizes and positions are integers × 10⁸ (`alphaquick.SCALE`), exact.
-Record times are .NET ticks (100 ns since 0001-01-01 UTC);
+Prices, sizes and positions are integers × 10⁸ (`alphaquick.SCALE`), with no
+float rounding. (L2 files up to 2026-11-25 hold prices and sizes to 6 decimal
+places only.) Record times are .NET ticks (100 ns since 0001-01-01 UTC);
 `aq.ticks_to_datetime` converts them.
 
 ### L2 depth & trades
@@ -85,18 +86,41 @@ import alphaquick as aq
 from alphaquick import l2
 
 book = aq.L2Book()
-for event in aq.read_l2("BTCUSDT_BINANCE_USDM_20261101.bin.lz4"):
+for event in aq.read_l2("BTCUSDT_BINANCE_USDM_20261126.bin.lz4", continuity="auto"):
     if type(event) is l2.Trade:
         print(event.datetime, event.price / aq.SCALE, event.volume / aq.SCALE, event.side)
     else:
-        book.apply(event)          # volume is the new size at the level; 0 removes it
-        if book.consistent:        # the end of a batch: the book is whole here
+        book.apply(event)          # volume is the new size at the level; 0 removes it; a Gap marks the book unknown
+        if book.consistent and book.known:   # the end of a batch, and not inside a gap: the book is the venue's
             bid, ask = book.best_bid(), book.best_ask()
 ```
 
-`l2.book_at(path, aq.datetime_to_ticks(moment))` gives the book at a moment.
+A trade's `side` is the aggressor, 1 buy or 2 sell (LIGHTER files up to
+2026-11-25 have 1 on every trade). `trade_id` is the trade's number in the file
+(1, 2, …), given by the recorder, not the venue's id; in files up to 2026-11-25
+it starts again at 1 after a restart of the recorder, so it can repeat.
+
+**Gaps.** Next to each file, `<name>.continuity.jsonl` records every fresh
+start of the book (`seed`) and every break in the venue's feed (`gap`: a
+disconnect, a sequence gap, …). After a gap no depth is written for the
+instrument until the next seed, an update with the `CLEAR` flag; trades go on.
+`aq.read_continuity(path)` reads the lines. With `continuity="auto"` (the file
+next to the data file) or a path, `read_l2` yields each gap as an `l2.Gap`
+event before the first record at or after its time, and never after the
+`CLEAR` update that ends it; `L2Book.apply` then sets `book.known` to False
+until that update. Use `book.consistent and book.known`.
+
+`l2.book_at(path, aq.datetime_to_ticks(moment))` gives the book at a moment
+(it reads the continuity file next to `path` by default; check `book.known`).
+Only depth updates decide where it stops, so a trade stamped a little later
+does not cut the book short.
+
 `aq.L2Book(uncross=True)` drops the levels a new level crosses, as Depth
-Replay does for feeds that never delete swept levels.
+Replay does. It is there for BINANCE_USDM and ASTER files up to 2026-11-25:
+the earlier recorder did not check the venue's sequence or take fresh
+snapshots, so those files hold levels that were never removed. `uncross`
+hides the crossed part near the best prices; stale levels deeper in the book
+remain. Files from 2026-11-26 are sequence-checked.
 
 ### Order log: the book, queues and accounts
 
@@ -132,7 +156,36 @@ for record in replay:
 `aq.read_orderlog(path)` yields the records without keeping a book: `Meta`,
 `Block`, `User`, `SnapOrder`, `Order`, `Trade` and `Outcome`. The status, time
 in force and order type codes are in `ol.Status`, `ol.Tif` and `ol.OrderType`;
-`ol.status_name(code)` gives Hyperliquid's name.
+`ol.status_name(code)` gives Hyperliquid's name, and `ol.REMOVING_STATUSES` and
+`ol.REJECT_STATUSES` say which statuses take an order off the book and which
+are rejections. Apply the records in file order (`Replay` does): within a
+block the format puts opens, rejects and triggers first, then the trades,
+then the reduce-only resizes, then the removals.
+
+Statuses 250–252 are written by the converter and change the book like any
+other event; their flags say why. 251 with `ol.ORDER_REBUILT` is an order of
+a system account (Hyperliquidity), whose placement the node never logs,
+written in the block it was placed in; 251 with neither that flag nor the
+one below is a triggered stop or take-profit limit order that starts resting. 252 with `ol.ORDER_RO_CAP` is
+the exchange shrinking a reduce-only order to the account's position, written
+after the block's trades with the size after them. 250, 251 or 252 with
+`ol.ORDER_SNAPSHOT_FIX` is a correction against an exchange snapshot, in a
+`Block` of its own.
+
+`trade.is_system_print` marks a trade the exchange booked without a match in
+the book: settlements, lending-pool liquidations, vault nettings, HIP-4
+outcome actions. Its counter-order was never in a book. Exchange candles do
+not count these trades, so leave them out of volume and price statistics
+when you compare with candles.
+
+Queue order is the order of placement. It is exact except among orders at one
+price placed less than 400 ms apart: there the exchange sorts post-only
+orders by the priority fee their senders paid, which is not in the data.
+Prices, sizes and which orders rest are exact.
+
+`Block.local_time_ns` equals the block time in current files (no receive time
+is published). `Meta.dex` is 0 for the main perpetuals, the deployer's dex for
+HIP-3 markets and 254 for spot pairs and HIP-4 outcome files.
 
 ### HIP-4 outcome (prediction) markets
 
@@ -144,22 +197,36 @@ undoes that. For each trade, `replay.last_trade_kind` says what it did:
 `MINT` (a buy on each book created a pair), `MERGE` (a sell on each redeemed
 one), `FIRST_BOOK` or `SECOND_BOOK` (tokens changed hands on one book).
 `replay.outcome` holds the market's name, its sides and, once settled, the
-result. Positions in a trade (`maker_position`, `taker_position`) are in the
-token of each order's own book.
+result (`replay.meta.coin` is `HIP4:<outcome id>`). Positions in a trade
+(`maker_position`, `taker_position`) are in the token of each order's own book.
+
+Queue order is meaningful only within one side's book: at the same price in
+the first side's terms, an order of one book is never ahead of an order of
+the other. The replay's book keeps one queue per book at each price:
+`book.queue(side, price)` is the first side's and
+`book.queue(side, price, second_side=True)` the second's, and
+`book.queue_position(oid)` counts only the order's own book.
+
+Outcome files are published in a `hip4/` folder of each day, as
+`HIP4_<outcome id>_<short name>_HLC_<day>.bin.lz4`, or `HIP4_<outcome id>_HLC_<day>.bin.lz4`
+when the title gives no short name.
 
 ### pandas and Parquet
 
 ```python
 from alphaquick import frames
 
-trades = frames.orderlog_trades(path)     # time, block, price, size, taker_side, maker, taker, oids, positions
+trades = frames.orderlog_trades(path)     # time, block, price, size, taker_side, maker, taker, oids, positions, system_print
 orders = frames.orderlog_orders(path, include_rejects=False)
 quotes = frames.l2_quotes(l2_path)        # best bid and ask after each consistent update
 book = frames.book_frame(replay.book, replay.accounts)   # every resting order with its place in the queue
 trades.to_parquet("trades.parquet")
 ```
 
-Floats by default; `exact=True` keeps the integers × 10⁸.
+Floats by default; `exact=True` keeps the integers × 10⁸. `l2_quotes` reads
+the continuity file next to the data file: there are no rows inside a gap,
+and the gap itself is a row with the quotes missing, so the last quote before
+a gap is not carried through it (by `merge_asof`, for example).
 
 `replay.run(until=…)` always reads the file's first block, which holds the book
 at 00:00 UTC, so a moment before the day gives the day-start book. A truncated
@@ -216,6 +283,7 @@ best price and, for the HIP-4 sample, every trade's kind.
 python -m venv .venv && .venv/bin/pip install -e ".[pandas,test]"
 .venv/bin/pytest                                   # unit tests; the sample tests run when the samples are cached
 ALPHAQUICK_FETCH_SAMPLES=1 .venv/bin/pytest        # also downloads the small samples (about 20 MB)
+ALPHAQUICK_HLC_V2_DIR=path/to/20261117 .venv/bin/pytest   # also checks real order-log files of that day, if you have them
 ```
 
 MIT licence. The data itself is covered by your AlphaQuick plan's terms.

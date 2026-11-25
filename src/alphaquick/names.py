@@ -7,7 +7,11 @@ splitting.
 
 Order-log files are ``<COIN>_HLC_<YYYYMMDD>.bin.lz4``, the Hyperliquid coin
 with ``:``, ``@`` and ``/`` written as ``_`` (``xyz:CL`` -> ``xyz_CL``), or
-``HIP4_<outcome id>_<short name>`` for a HIP-4 outcome market with both books.
+``HIP4_<outcome id>_<short name>`` for a HIP-4 outcome market with both books
+(``HIP4_<outcome id>`` alone when the market's title gives no short name).
+They are published one folder per day, the outcome files in a ``hip4/``
+folder of their own: ``<YYYYMMDD>/hip4/HIP4_..._HLC_<YYYYMMDD>.bin.lz4`` (in R2
+under ``hyperliquid/hlc_v2/``).
 """
 
 from __future__ import annotations
@@ -20,14 +24,15 @@ from typing import NamedTuple, Optional
 #: the last part of the name as its code).
 L2_VENUES = tuple(sorted((
     "BYBIT_INVERSE", "BINANCE_USDM", "BINANCE_COINM", "BINANCE_SPOT", "BINANCE_HFT",
-    "HYPERLIQUID_NODE", "HYPERLIQUID", "BINANCE", "BITHUMB", "LIGHTER", "ASTER",
+    "HYPERLIQUID_NODE", "HYPERLIQUID_bbo", "HYPERLIQUID", "BINANCE", "BITHUMB", "LIGHTER", "ASTER",
     "BYBIT", "UPBIT", "DYDX", "OKX",
 ), key=len, reverse=True))
 
 _L2_FILE = re.compile(r"^(.+)_([0-9]{8})\.(bin\.lz4|continuity\.jsonl)$")
 _NODE_VENUE = re.compile(r"_(HYPERLIQUID_NODE_[A-Z]_[A-Za-z0-9]+)$")
 _HLC_FILE = re.compile(r"^(.+)_HLC_([0-9]{8})\.bin\.lz4$")
-_MERGED_OUTCOME = re.compile(r"^HIP4_[0-9]{1,10}_[A-Za-z0-9][A-Za-z0-9.-]{0,60}$")
+# HIP4_<outcome id>, with the short name of the market's title when it has one
+_MERGED_OUTCOME = re.compile(r"^HIP4_[0-9]{1,10}(?:_[A-Za-z0-9][A-Za-z0-9.-]{0,60})?$")
 
 
 class L2Name(NamedTuple):
@@ -38,7 +43,9 @@ class L2Name(NamedTuple):
 
 
 class OrderLogName(NamedTuple):
-    coin: str  #: Hyperliquid's name: ``BTC``, ``xyz:CL``, ``@107``, ``PURR/USDC``, ``#114220``, or the HIP4_ name
+    #: Hyperliquid's name: ``BTC``, ``xyz:CL``, ``@107``, ``PURR/USDC``, ``#114220``, or for an
+    #: outcome file with both books the file's ``HIP4_<id>[_<short name>]`` (its META says ``HIP4:<id>``)
+    coin: str
     market: str  #: ``perp``, the HIP-3 dex (``xyz``), ``spot`` or ``outcome``
     day: str  #: YYYYMMDD (UTC)
 

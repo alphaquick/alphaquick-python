@@ -1,12 +1,14 @@
 import json
+import struct
 
 import pytest
 
 import alphaquick as aq
 from alphaquick import cli, l2, orderlog as ol
 
-from build import T0, container, depth, l2_trade
-from test_orderlog import B1, capture, outcome_capture
+from build import P, T0, block, container, depth, header, l2_trade, meta, order, outcome, snap, trade, user
+from test_l2 import G, GAPPED_LINES, S2, TR2, gapped
+from test_orderlog import B1, OUTCOME_TEXT, capture, outcome_capture
 
 pd = pytest.importorskip("pandas")
 frames = pytest.importorskip("alphaquick.frames")
@@ -130,3 +132,89 @@ def test_detect(l2_file, orderlog_file, tmp_path):
     empty.write_bytes(b"")
     assert aq.detect(empty) is None
     assert ol.KIND_META == 16
+
+
+# -- 0.2.0 ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def gapped_file(tmp_path):
+    path = tmp_path / "SYM_EX_20261023.bin.lz4"
+    path.write_bytes(gapped())
+    (tmp_path / "SYM_EX_20261023.continuity.jsonl").write_text("".join(json.dumps(x) + "\n" for x in GAPPED_LINES))
+    return path
+
+
+def test_l2_quotes_do_not_carry_a_book_through_a_gap(gapped_file):
+    quotes = frames.l2_quotes(gapped_file)
+    assert quotes["time"].is_monotonic_increasing
+    values = quotes[["bid", "ask"]].values.tolist()
+    assert values[:2] == [[100.0, 101.0], [100.5, 101.0]] and values[3] == [99.0, 99.5]
+    assert pd.isna(values[2][0]) and pd.isna(values[2][1])  # the gap: no quote from here
+    assert quotes["time"].iloc[2] == pd.Timestamp(aq.ticks_to_datetime(G))
+    exact = frames.l2_quotes(gapped_file, exact=True)
+    assert str(exact["bid"].dtype) == "Int64" and exact["bid"].isna().tolist() == [False, False, True, False]
+    assert exact["bid"].iloc[0] == 100 * P
+    plain = frames.l2_quotes(gapped_file, continuity=None)  # gaps not read: the old rows only
+    assert len(plain) == 3 and not plain["bid"].isna().any()
+    # a size too large for a float stays exact
+    big = gapped_file.parent / "BIG_EX_20261023.bin.lz4"
+    huge = header(0, 29, T0) + struct.pack("<qqB", P, 100_000_000_000_000_001, l2.BUY | l2.CLEAR)  # 1e9 + 1e-8
+    big.write_bytes(container(huge + depth(T0, 2.0, 1.0, l2.SELL | l2.END_OF_TRANSACTION)))
+    assert frames.l2_quotes(big, exact=True)["bid_size"].iloc[0] == 100_000_000_000_000_001
+
+
+def test_cli_warns_inside_a_gap(gapped_file, capsys):
+    moment = aq.ticks_to_datetime(TR2).strftime("%H:%M:%S.%f")
+    assert cli.main(["book", str(gapped_file), "--at", moment]) == 0
+    out = capsys.readouterr().out
+    assert "warning: the moment asked is inside a gap in the feed since 2026-10-23" in out and "(sequence)" in out
+    assert cli.main(["book", str(gapped_file), "--at", aq.ticks_to_datetime(S2).strftime("%H:%M:%S.%f")]) == 0
+    assert "warning" not in capsys.readouterr().out
+    assert cli.main(["book", str(gapped_file), "--at", moment, "--continuity", str(gapped_file) + ".none"]) == 1
+    assert "alphaquick:" in capsys.readouterr().err
+    assert cli.main(["info", str(gapped_file)]) == 0
+    out = capsys.readouterr().out
+    assert "gaps in the feed (continuity file): 1 (sequence 1)" in out and "warning" not in out
+
+
+def test_orderlog_frames_v2(tmp_path):
+    path = tmp_path / "HMSTR_HLC_20261023.bin.lz4"
+    system = ol.TRADE_MAKER_OID | (ol.TRADE_SYSTEM_PRINT << ol.TRADE_DIRECTION_SHIFT)
+    path.write_bytes(container(
+        meta("HMSTR") + user(1, 0xAA) + user(2, 0xBB) + snap(10, ol.BID, 1.0, 5.0, 1),
+        block(500, B1)
+        + order(ol.Status.PERP_MAX_POSITION_REJECTED, 20, ol.BID, 1.2, 1.0, 2, time=B1)
+        + order(ol.Status.PRIORITY_ALO_REDUCE_ONLY_REJECTED, 21, ol.ASK, 0.8, 1.0, 2, tif=ol.Tif.ALO, time=B1)
+        + trade(ol.ASK, 1.0, 1.0, 10, 0, 1, 2, flags=ol.TRADE_MAKER_OID, time=B1)
+        + trade(ol.ASK, 1.0, 2.0, 77, 0, 2, 1, flags=system, time=B1)
+        + order(ol.Status.DELISTED_CANCELED, 10, ol.BID, 1.0, 4.0, 1, time=B1),
+    ))
+    trades = frames.orderlog_trades(path)
+    assert trades["system_print"].tolist() == [False, True] and trades["system_print"].dtype == bool
+    assert trades.loc[~trades.system_print, "size"].sum() == 1.0
+    orders = frames.orderlog_orders(path, include_rejects=False)
+    assert orders["status"].tolist() == ["delistedCanceled"]
+    assert len(frames.orderlog_orders(path)) == 3
+
+
+def test_outcome_book_frame_and_cli_queues(tmp_path, capsys):
+    path = tmp_path / "HIP4_3600_HLC_20261023.bin.lz4"
+    path.write_bytes(container(
+        meta("HIP4:3600", flags=ol.META_OUTCOME) + outcome(OUTCOME_TEXT) + user(1, 1) + user(2, 2),
+        block(1, B1)
+        + order(ol.Status.OPEN, 1, ol.BID, 0.60, 5, 1, time=B1)
+        + order(ol.Status.OPEN, 2, ol.BID, 0.60, 7, 2, flags=ol.ORDER_SECOND_SIDE, time=B1)
+        + order(ol.Status.OPEN, 3, ol.BID, 0.60, 1, 1, time=B1)
+        + order(ol.Status.OPEN, 4, ol.ASK, 0.61, 1, 1, time=B1),
+    ))
+    replay = aq.Replay(path).run()
+    book = frames.book_frame(replay.book, replay.accounts)
+    assert book[["oid", "queue", "second_side"]].values.tolist() == [[1, 0, False], [3, 1, False], [2, 0, True], [4, 0, False]]
+    assert cli.main(["book", str(path), "--queue", "5"]) == 0
+    out = capsys.readouterr().out
+    assert "queue at the best bid 0.6 (Yes's book), front first:" in out
+    assert "queue at the best bid 0.6 (No's book), front first:" in out
+    assert "(No's book)" not in out.split("queue at the best ask")[1]  # no empty queue listed
+    assert cli.main(["info", str(path)]) == 0
+    assert "Order log: Fed decision — No change (outcome)" in capsys.readouterr().out
