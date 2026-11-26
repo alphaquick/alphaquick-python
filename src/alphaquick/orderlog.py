@@ -21,9 +21,11 @@ Rebuild the book with :class:`Replay` (or :class:`OrderBook` directly)::
         ...
     replay.book.best_bid()
 
-Files are published one folder per day, ``<YYYYMMDD>/<COIN>_HLC_<YYYYMMDD>.bin.lz4``,
-with the HIP-4 outcome files in ``<YYYYMMDD>/hip4/`` (in R2 under
-``hyperliquid/hlc_v2/``).
+Files are published one folder per day and market type (in R2 under
+``hyperliquid/hlc_v2/``): ``<YYYYMMDD>/PERPS/BTC_HLC_<YYYYMMDD>.bin.lz4``,
+``HIP3/xyz_CL_…``, ``SPOT/HYPE_USDC_…`` and ``HIP4/<title>_id<outcome id>_…``,
+listed with each market's venue id in ``INSTRUMENTS_HLC_<YYYYMMDD>.json``
+(see :mod:`alphaquick.names`).
 
 See https://docs.alphaquick.io/data/hyperliquid-order-log#format
 """

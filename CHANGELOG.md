@@ -27,11 +27,20 @@ Order log:
   only orders of the same book. `queue(side, price, second_side=False)` picks
   the book; `frames.book_frame` gains a `second_side` column for such books,
   and `alphaquick book --queue` lists both queues.
+- File names of the published layout: one folder per market type in each
+  day, `PERPS/BTC_…`, `HIP3/xyz_NVDA_…`, `SPOT/HYPE_USDC_…` and
+  `HIP4/<title>_id<outcome id>_…`. `names.parse_orderlog_name` lets the
+  folder decide the type (`names.orderlog_coin(stem, folder)`,
+  `names.ORDERLOG_FOLDERS`); a bare `<title>_id<N>` is the outcome
+  `HIP4:<N>` and may be longer than 80 characters (titles are never
+  shortened); `SPOT/HYPE_USDC` reads `HYPE/USDC` (the venue's `@107` is in
+  META and `INSTRUMENTS_HLC_<day>.json`). Names of the earlier, unpublished
+  layout (`_107`, `HIP4_<id>[_<short name>]`, `#<id><side>`) read as before.
 - A file named `HIP4_<id>_HLC_<day>.bin.lz4` (no short name) is an outcome
   file, not the spot pair `HIP4/<id>`.
 - Documented: `Block.local_time_ns` equals the block time; `Meta.dex` (254
   for spot and HIP-4, `DEX_SPOT`) and the `HIP4:<id>` coin; the 400 ms limit
-  of queue order (priority fees); the `hip4/` folder.
+  of queue order (priority fees); the folders of a day.
 
 L2:
 

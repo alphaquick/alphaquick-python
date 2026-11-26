@@ -207,9 +207,44 @@ the other. The replay's book keeps one queue per book at each price:
 `book.queue(side, price, second_side=True)` the second's, and
 `book.queue_position(oid)` counts only the order's own book.
 
-Outcome files are published in a `hip4/` folder of each day, as
-`HIP4_<outcome id>_<short name>_HLC_<day>.bin.lz4`, or `HIP4_<outcome id>_HLC_<day>.bin.lz4`
-when the title gives no short name.
+Outcome files are in the `HIP4/` folder of each day, named by the market's
+title and outcome id (see below).
+
+### File names and folders
+
+Order-log files are published one folder per day and market type
+(`hyperliquid/hlc_v2/<day>/` in R2):
+
+| Folder | File name | Example |
+|---|---|---|
+| `PERPS/` | `<COIN>_HLC_<day>.bin.lz4` | `BTC_HLC_20261119.bin.lz4`, `kPEPE_…` |
+| `HIP3/` | `<dex>_<COIN>_HLC_<day>.bin.lz4` | `xyz_NVDA_…` is `xyz:NVDA` |
+| `SPOT/` | `<BASE>_<QUOTE>_HLC_<day>.bin.lz4` | `HYPE_USDC_…` is `@107`; `PURR_USDC_…` is `PURR/USDC` |
+| `HIP4/` | `<title>_id<outcome id>_HLC_<day>.bin.lz4` | `BTC-touches-60000-by-2026-12-01-0000-UTC_id37348_…` |
+
+A HIP-4 title is written with `22:50` as `2250`, `$` left out and every other
+run of characters but letters, digits and dots inside numbers as `-`; it is
+never shortened. The name is a label to read: the venue's own id is the coin
+of the file's META record (`@107`, `xyz:NVDA`, `HIP4:37348`), and
+`INSTRUMENTS_HLC_<day>.json` in the day's folder lists every file with its
+type and venue id.
+
+`names.parse_orderlog_name` reads a name. In a path the folder says the type;
+a bare name is read by its shape (`<title>_id<N>` an outcome, `<dex>_<COIN>`
+with the dex in lower case a HIP-3 market, `<BASE>_<QUOTE>` a spot pair,
+anything else a perpetual):
+
+```python
+from alphaquick import names
+
+names.parse_orderlog_name("20261119/SPOT/HYPE_USDC_HLC_20261119.bin.lz4")
+# OrderLogName(coin='HYPE/USDC', market='spot', day='20261119')
+names.parse_orderlog_name("BTC-touches-60000-by-2026-12-01-0000-UTC_id37348_HLC_20261119.bin.lz4")
+# OrderLogName(coin='HIP4:37348', market='outcome', day='20261119')
+```
+
+A spot pair reads as its tokens (`HYPE/USDC`), not the venue's `@107`, which
+is in META and INSTRUMENTS.
 
 ### pandas and Parquet
 

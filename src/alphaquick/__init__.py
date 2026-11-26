@@ -4,8 +4,9 @@ Two datasets, one container:
 
 * **L2 depth & trades** (``<INSTRUMENT>_<VENUE>_<YYYYMMDD>.bin.lz4``): every
   depth update and trade of one instrument for a day. :mod:`alphaquick.l2`.
-* **Hyperliquid order log** (``<COIN>_HLC_<YYYYMMDD>.bin.lz4``): every order and
-  trade with accounts and queue positions (Level 3). :mod:`alphaquick.orderlog`.
+* **Hyperliquid order log** (``<YYYYMMDD>/<TYPE>/<NAME>_HLC_<YYYYMMDD>.bin.lz4``,
+  TYPE one of PERPS, HIP3, SPOT, HIP4; see :mod:`alphaquick.names`): every order
+  and trade with accounts and queue positions (Level 3). :mod:`alphaquick.orderlog`.
 
 Quick start::
 

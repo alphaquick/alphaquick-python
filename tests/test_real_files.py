@@ -1,8 +1,10 @@
 """Real order-log files of the current converter (hyperliquid/hlc_v2/), when you have them.
 
-Set ALPHAQUICK_HLC_V2_DIR to a folder holding files of 17 November 2026
-(``PURR_USDC_HLC_20261117.bin.lz4``, and ``HIP4_1473_..._HLC_20261117.bin.lz4``
-in it or in its ``hip4/`` folder). Without them these tests are skipped.
+Set ALPHAQUICK_HLC_V2_DIR to a day folder of 17 November 2026 holding
+``SPOT/PURR_USDC_HLC_20261117.bin.lz4`` and
+``HIP4/2026-2027-English-Premier-League-winner-Arsenal_id1473_HLC_20261117.bin.lz4``
+(or the same files directly in it, or under the names of the earlier layout).
+Without them these tests are skipped.
 """
 
 import collections
@@ -14,13 +16,14 @@ import pytest
 from alphaquick import orderlog as ol
 
 
-def real_file(pattern: str) -> Path:
+def real_file(*patterns: str) -> Path:
     folder = os.environ.get("ALPHAQUICK_HLC_V2_DIR")
     if not folder:
         pytest.skip("set ALPHAQUICK_HLC_V2_DIR to a folder of hlc_v2 files to run this test")
-    found = sorted(Path(folder).glob(pattern)) + sorted(Path(folder).glob("hip4/" + pattern))
+    found = [path for pattern in patterns for sub in ("", "SPOT/", "HIP4/", "hip4/")
+             for path in sorted(Path(folder).glob(sub + pattern))]
     if not found:
-        pytest.skip(f"no {pattern} in {folder}")
+        pytest.skip(f"no {' or '.join(patterns)} in {folder}")
     return found[0]
 
 
@@ -52,7 +55,7 @@ def test_spot_book_never_crosses_with_the_v2_statuses():
 
 
 def test_outcome_fills_take_the_front_of_their_own_books_queue():
-    replay = ol.Replay(real_file("HIP4_1473_*_HLC_20261117.bin.lz4"))
+    replay = ol.Replay(real_file("*_id1473_HLC_20261117.bin.lz4", "HIP4_1473_*_HLC_20261117.bin.lz4"))
     places = collections.Counter()
     system = 0
     for record in replay._records():
